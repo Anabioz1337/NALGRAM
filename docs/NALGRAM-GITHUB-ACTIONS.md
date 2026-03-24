@@ -1,32 +1,20 @@
-# NALGRAM GitHub Actions
+# NALGRAM GitHub Actions build
 
-This workflow lets you drive the iOS build from Windows while the actual compilation happens on GitHub's hosted macOS runners.
+This repository can build `NALGRAM.ipa` on GitHub-hosted macOS runners.
 
-## Important limits
+## 1. Make the repository public
 
-- For free standard macOS runners, the repository should be public.
-- The workflow is manual-only via `workflow_dispatch` so your signing secrets are not exposed to pull requests.
-- This still is not a pure Windows build. It is a Windows-driven remote macOS build.
-- The workflow uses `macos-26-intel` on purpose because GitHub's standard public Intel macOS runner has more RAM than the standard arm64 runner.
+Standard GitHub-hosted macOS runners are free and unlimited only for public repositories.
 
-## Files added for this flow
+## 2. Prepare `NALGRAM_CONFIGURATION_JSON`
 
-- `.github/workflows/build-nalgram-ios.yml`
-- `build-system/Make/ImportCertificates.py` now supports `P12_PASSWORD` from the environment
+Use [`build-system/nalgram-development-configuration.sample.json`](../build-system/nalgram-development-configuration.sample.json) as the template.
 
-## Secrets to create in GitHub
-
-Create these repository secrets in `Settings -> Secrets and variables -> Actions`.
-
-### `NALGRAM_CONFIGURATION_JSON`
-
-Paste the full JSON based on `build-system/nalgram-development-configuration.sample.json`.
-
-Minimal example:
+Example:
 
 ```json
 {
-  "bundle_id": "org.example.NALGRAM",
+  "bundle_id": "com.anabioz.nalgram",
   "api_id": "123456",
   "api_hash": "0123456789abcdef0123456789abcdef",
   "team_id": "ABCDE12345",
@@ -41,66 +29,97 @@ Minimal example:
 }
 ```
 
-### `NALGRAM_CODESIGNING_ZIP_B64`
+Field notes:
 
-This secret must contain a base64-encoded zip archive with this structure:
+- `bundle_id`: your base bundle id, for example `com.anabioz.nalgram`
+- `api_id` and `api_hash`: get them from `https://my.telegram.org/apps`
+- `team_id`: your Apple Developer Team ID
+- `app_specific_url_scheme`: keep `nalgram`
+- `enable_siri` and `enable_icloud`: keep `false` unless you really need them
+
+## 3. Prepare the signing bundle
+
+Create a directory with this structure:
 
 ```text
-certs/
-  your-signing-cert.p12
-  AppleWWDRCAG3.cer (optional)
-profiles/
-  Telegram.mobileprovision
-  Share.mobileprovision
-  Widget.mobileprovision
-  NotificationService.mobileprovision
-  NotificationContent.mobileprovision
-  Intents.mobileprovision
-  WatchApp.mobileprovision
-  WatchExtension.mobileprovision
-  BroadcastUpload.mobileprovision
+codesigning/
+  certs/
+    development.p12
+  profiles/
+    Telegram.mobileprovision
+    Share.mobileprovision
+    Widget.mobileprovision
+    NotificationService.mobileprovision
+    NotificationContent.mobileprovision
+    Intents.mobileprovision
+    WatchApp.mobileprovision
+    WatchExtension.mobileprovision
+    BroadcastUpload.mobileprovision
 ```
 
-The profile filenames above are the safest choice for this repository layout.
+Notes:
 
-To create the secret value on Windows:
+- The `.p12` file must contain your iPhone Developer certificate.
+- The provisioning profiles must match your base `bundle_id`.
+- The profile filenames are not important to the build script, but keeping the names above makes the bundle easy to audit.
+
+Expected bundle identifiers:
+
+- `bundle_id`
+- `bundle_id.Share`
+- `bundle_id.Widget`
+- `bundle_id.NotificationService`
+- `bundle_id.NotificationContent`
+- `bundle_id.SiriIntents`
+- `bundle_id.watchkitapp`
+- `bundle_id.watchkitapp.watchkitextension`
+- `bundle_id.BroadcastUpload`
+
+Zip the folder on Windows:
 
 ```powershell
-Compress-Archive -Path .\certs,.\profiles -DestinationPath .\nalgram-signing.zip -Force
-[Convert]::ToBase64String([IO.File]::ReadAllBytes('.\\nalgram-signing.zip')) | Set-Clipboard
+Compress-Archive -Path .\codesigning\certs,.\codesigning\profiles -DestinationPath .\nalgram-signing.zip -Force
 ```
 
-Then paste the clipboard contents into `NALGRAM_CODESIGNING_ZIP_B64`.
+Convert the zip to Base64:
 
-### `NALGRAM_P12_PASSWORD`
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes('.\nalgram-signing.zip')) | Set-Clipboard
+```
 
-Optional.
+## 4. Add GitHub Actions secrets
 
-Set this only if your `.p12` certificate has a password. Leave it unset if the `.p12` is exported without a password.
+In your repository open `Settings -> Secrets and variables -> Actions` and create:
 
-## How to run the build
+- `NALGRAM_CONFIGURATION_JSON`
+- `NALGRAM_CODESIGNING_ZIP_B64`
+- `NALGRAM_P12_PASSWORD`
 
-1. Push your fork to GitHub.
-2. Make the repository public if you want to stay on the free GitHub-hosted macOS tier.
-3. Create the three secrets above.
-4. Open `Actions -> Build NALGRAM iOS`.
-5. Click `Run workflow`.
-6. Wait for the job to finish and download the `nalgram-ios-build` artifact.
+Put the full JSON into `NALGRAM_CONFIGURATION_JSON`.
 
-## Notes about submodules
+Put the Base64 text from the previous step into `NALGRAM_CODESIGNING_ZIP_B64`.
 
-The workflow rewrites the relative git submodule URLs for:
+If your `.p12` has no password, set `NALGRAM_P12_PASSWORD` to an empty string.
 
-- `submodules/rlottie/rlottie`
-- `submodules/TgVoipWebrtc/tgcalls`
+## 5. Run the workflow
 
-This is necessary because a GitHub fork would otherwise resolve `../rlottie.git` and `../tgcalls.git` against your own account instead of the upstream `TelegramMessenger` repositories.
+Open `Actions -> Build NALGRAM iOS -> Run workflow`.
 
-## After the build
+The workflow file is:
 
-If the build succeeds, GitHub Actions uploads:
+- [`.github/workflows/build-nalgram-ios.yml`](../.github/workflows/build-nalgram-ios.yml)
+
+## 6. Download the result
+
+After a successful build, download the `nalgram-ios-build` artifact.
+
+It contains:
 
 - `NALGRAM.ipa`
 - `NALGRAM.DSYMs.zip`
 
-You can then sideload the IPA from Windows with AltStore or another signing/install tool.
+## 7. Install on iPhone from Windows
+
+Use AltStore or another sideload tool on Windows to install `NALGRAM.ipa`.
+
+This does not replace Apple signing. The GitHub workflow still requires a valid Apple certificate and provisioning profiles.
