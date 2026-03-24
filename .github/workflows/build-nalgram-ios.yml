@@ -1,0 +1,115 @@
+name: Build NALGRAM iOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_configuration:
+        description: Build configuration
+        required: true
+        default: release_arm64
+        type: choice
+        options:
+          - release_arm64
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nalgram-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26-intel
+    timeout-minutes: 180
+    env:
+      CONFIGURATION_PATH: ${{ github.workspace }}/build-input/github-actions/configuration.json
+      CODESIGNING_PATH: ${{ github.workspace }}/build-input/github-actions/signing
+      ARTIFACTS_PATH: ${{ github.workspace }}/build/artifacts
+      P12_PASSWORD: ${{ secrets.NALGRAM_P12_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rewrite relative submodule URLs
+        shell: bash
+        run: |
+          git config submodule.submodules/rlottie/rlottie.url https://github.com/TelegramMessenger/rlottie.git
+          git config submodule.submodules/TgVoipWebrtc/tgcalls.url https://github.com/TelegramMessenger/tgcalls.git
+          git submodule sync --recursive
+
+      - name: Fetch submodules
+        shell: bash
+        run: git submodule update --init --recursive --jobs 8
+
+      - name: Select Xcode 26.2 if available
+        shell: bash
+        run: |
+          if [ -d /Applications/Xcode_26.2.app ]; then
+            sudo xcode-select -s /Applications/Xcode_26.2.app
+          fi
+          xcodebuild -version
+
+      - name: Prepare build inputs
+        shell: bash
+        env:
+          NALGRAM_CONFIGURATION_JSON: ${{ secrets.NALGRAM_CONFIGURATION_JSON }}
+          NALGRAM_CODESIGNING_ZIP_B64: ${{ secrets.NALGRAM_CODESIGNING_ZIP_B64 }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${NALGRAM_CONFIGURATION_JSON}" ]; then
+            echo "NALGRAM_CONFIGURATION_JSON secret is missing"
+            exit 1
+          fi
+
+          if [ -z "${NALGRAM_CODESIGNING_ZIP_B64}" ]; then
+            echo "NALGRAM_CODESIGNING_ZIP_B64 secret is missing"
+            exit 1
+          fi
+
+          mkdir -p "$(dirname "${CONFIGURATION_PATH}")"
+          mkdir -p "${CODESIGNING_PATH}"
+          mkdir -p "${ARTIFACTS_PATH}"
+
+          printf '%s' "${NALGRAM_CONFIGURATION_JSON}" > "${CONFIGURATION_PATH}"
+          python3 - <<'PY'
+          import base64
+          import os
+          import pathlib
+
+          payload = os.environ["NALGRAM_CODESIGNING_ZIP_B64"]
+          output = pathlib.Path(os.environ["RUNNER_TEMP"]) / "nalgram-signing.zip"
+          output.write_bytes(base64.b64decode(payload))
+          PY
+          unzip -q "${RUNNER_TEMP}/nalgram-signing.zip" -d "${CODESIGNING_PATH}"
+
+          test -d "${CODESIGNING_PATH}/certs"
+          test -d "${CODESIGNING_PATH}/profiles"
+
+      - name: Build IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 build-system/Make/Make.py \
+            --overrideXcodeVersion \
+            --cacheDir="$HOME/telegram-bazel-cache" \
+            build \
+            --configurationPath="${CONFIGURATION_PATH}" \
+            --codesigningInformationPath="${CODESIGNING_PATH}" \
+            --buildNumber="${{ github.run_number }}" \
+            --configuration="${{ inputs.build_configuration }}" \
+            --outputBuildArtifactsPath="${ARTIFACTS_PATH}"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: nalgram-ios-build
+          path: |
+            ${{ env.ARTIFACTS_PATH }}/NALGRAM.ipa
+            ${{ env.ARTIFACTS_PATH }}/NALGRAM.DSYMs.zip
+          if-no-files-found: error
+          retention-days: 7
