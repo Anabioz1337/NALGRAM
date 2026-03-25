@@ -1,0 +1,48 @@
+name: Build NALGRAM AltStore IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Prepare AltStore configuration
+        shell: bash
+        run: |
+          mkdir -p build-input/github-secrets
+          cat > build-input/github-secrets/altstore-configuration.json <<'EOF'
+          ${{ secrets.NALGRAM_ALTSTORE_CONFIGURATION_JSON }}
+          EOF
+
+      - name: Build AltStore-compatible IPA
+        shell: bash
+        run: |
+          mkdir -p build/artifacts
+          python3 build-system/Make/Make.py \
+            --cacheDir="$HOME/telegram-bazel-cache" \
+            --overrideXcodeVersion \
+            build \
+            --configuration release_arm64 \
+            --buildNumber "${{ github.run_number }}" \
+            --configurationPath build-input/github-secrets/altstore-configuration.json \
+            --codesigningInformationPath build-system/fake-codesigning \
+            --disableExtensions \
+            --outputBuildArtifactsPath build/artifacts
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nalgram-altstore-build
+          path: |
+            build/artifacts/NALGRAM.ipa
+            build/artifacts/NALGRAM.DSYMs.zip
+          if-no-files-found: error
